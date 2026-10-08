@@ -1,12 +1,16 @@
-// A session whose workspace is NOT a remote mirror must not be offered the
-// session-bound rw_* tools.
+// The rw_* tools must be offered ONLY to a session whose workspace is a
+// dsh-remote mirror.
 //
 // The bug this pins: every rw_* schema was registered globally and therefore
 // appeared in the model's tool list for EVERY session, including a plain local
-// one — where each of those tools is guaranteed to fail, because
-// requireBinding()/requireMachine() refuse a caller with no mirror. The model
-// reached for rw_read_file to look at a file and burned a turn on an error no
-// correct usage could avoid.
+// one. For the session-bound tools that is not a missing feature but a
+// guaranteed failure — requireBinding()/requireMachine() refuse a caller whose
+// cwd resolves to no mirror, because there is no remote root to resolve a path
+// against — so the model reached for rw_read_file to "look at a file" and burned
+// a turn on an error no correct usage could avoid. For the rest (rw_info,
+// rw_connect, rw_machines, rw_pick_workspace, rw_forward, rw_disconnect) there
+// is simply no remote host this session is bound to, so they describe nothing
+// and act on nothing. Either way the listing was a false statement.
 //
 // The fence is `tools.restrict({ deny })` on the agent's own scoped context,
 // which is the only mechanism the harness offers (dsh-tools `view(scope)` drops
@@ -18,14 +22,11 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'nod
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import {
-  SESSION_BOUND_TOOLS,
-  SESSION_WIDE_TOOLS,
-  fenceAgent,
-  fenceLocalSessions,
-} from '../lib/tool-visibility.js'
+import { fenceAgent, fenceLocalSessions } from '../lib/tool-visibility.js'
 
 // ── helpers ────────────────────────────────────────────────────────────────
+
+const DENY = ['rw_info', 'rw_connect', 'rw_machines', 'rw_pick_workspace', 'rw_list_dir', 'rw_exec']
 
 /** An agent whose session workspace is `cwd`, recording every restrict() call. */
 const makeAgent = (cwd) => {
@@ -107,8 +108,7 @@ async function loadPlugin(home) {
 function makePluginCtx() {
   const registered = new Map()
   const listeners = new Map()
-  const agentTools = []
-  const ctx = {
+  return {
     effect: () => {},
     inject: () => {},
     get: (k) => (k === 'sessions' ? { get: () => null, list: () => [] } : undefined),
@@ -119,9 +119,9 @@ function makePluginCtx() {
     },
     logger: { info: () => {}, warn: () => {} },
     systemPrompt: { section: () => {}, context: () => {} },
-    // Mirrors the real ToolRuntime contract that the fence depends on:
-    // `restrict` is only legal on a SCOPED context, so the fake throws when
-    // called from the plugin's own (global) context.
+    // Mirrors the real ToolRuntime contract the fence depends on: `restrict` is
+    // only legal on a SCOPED context, so the fake throws when called from the
+    // plugin's own (global) context.
     tools: {
       register(t) {
         registered.set(t.name, t)
@@ -134,10 +134,8 @@ function makePluginCtx() {
     emitAgentCreated(agent) {
       for (const fn of listeners.get('agent/created') || []) fn({ agent })
     },
-    agentTools,
     registered,
   }
-  return ctx
 }
 
 /** An agent whose tools service records what the plugin fenced. */
@@ -154,76 +152,110 @@ const scopedAgent = (cwd) => {
   return agent
 }
 
-// ── the two lists partition the tool set, and the partition is the right one ──
-
-test('the session-bound list is exactly the set of tools that refuse a local caller', () => {
-  // Derive the truth from the source: a tool is session-bound iff its execute
-  // body resolves through requireBinding()/requireMachine(). A new session-bound
-  // tool added without updating lib/tool-visibility.js would reintroduce the bug
-  // silently, so this is pinned against the file rather than a copy of the list.
+/** Every `rw_*` name the plugin declares, read straight from lib/index.js. */
+function declaredToolNames() {
   const src = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')
-  const blocks = src.split('defineTool({')
-  const tools = new Map()
-  for (const block of blocks.slice(1)) {
+  const names = new Set()
+  for (const block of src.split('defineTool({').slice(1)) {
     const name = /\bname:\s*'(rw_[a-z_]+)'/.exec(block)
     assert.ok(name, 'every defineTool({ block must declare a name')
-    tools.set(name[1], /require(?:Binding|Machine)\(exec\b/.test(block))
+    names.add(name[1])
   }
+  return names
+}
 
-  assert.equal(tools.size, 25, `expected 25 rw_* tools in lib/index.js, found ${tools.size}`)
-  const derived = [...tools].filter(([, bound]) => bound).map(([n]) => n).sort()
-  assert.deepEqual([...SESSION_BOUND_TOOLS].sort(), derived,
-    'SESSION_BOUND_TOOLS must match the tools that call requireBinding/requireMachine')
+// ── coverage: nothing may escape the fence ─────────────────────────────────
 
-  const wide = [...tools.keys()].filter((n) => !SESSION_BOUND_TOOLS.includes(n)).sort()
-  assert.deepEqual([...SESSION_WIDE_TOOLS].sort(), wide,
-    'SESSION_WIDE_TOOLS must be exactly the tools that stay visible everywhere')
+test('the fence denies EVERY declared rw_* tool, not a hand-picked subset', async () => {
+  const { home, mirrorCwd, localCwd } = makeHome()
+  mkdirSync(localCwd, { recursive: true })
+  try {
+    const { apply } = await loadPlugin(home)
+    const ctx = makePluginCtx()
+    await apply(ctx, { ...CONFIG })
 
-  // No overlap, and nothing outside the rw_* namespace is fenced.
-  for (const n of SESSION_BOUND_TOOLS) assert.ok(tools.has(n), `${n} is not a real tool`)
-  for (const n of SESSION_BOUND_TOOLS) assert.ok(!SESSION_WIDE_TOOLS.includes(n), `${n} appears in both lists`)
+    // Tools stay registered globally: a tool in an agent's own layer cannot be
+    // named by a restriction at all, so this must not change.
+    const registered = [...ctx.registered.keys()].sort()
+    assert.ok(registered.length >= 25, `expected the full rw_* tool set, got ${registered.length}`)
+
+    // …and the deny list is exactly that set, so a new tool cannot slip past.
+    const local = scopedAgent(localCwd)
+    ctx.emitAgentCreated(local)
+    assert.equal(local.calls.length, 1, 'a local session must be fenced')
+    assert.deepEqual([...local.calls[0].deny].sort(), registered,
+      'every registered tool must be hidden from a local session')
+
+    // The registration set really is the whole rw_* surface declared in source.
+    assert.deepEqual(registered, [...declaredToolNames()].sort(),
+      'a local session must see none of the declared rw_* tools')
+  } finally {
+    delete process.env.DSH_HOME
+    rmSync(home, { recursive: true, force: true })
+  }
 })
 
-test('the setup flow a local session needs is never fenced', () => {
-  // Hiding these would leave a local session with no way to become a remote one.
-  for (const n of ['rw_info', 'rw_connect', 'rw_machines', 'rw_pick_workspace', 'rw_forward', 'rw_disconnect']) {
-    assert.ok(SESSION_WIDE_TOOLS.includes(n), `${n} must stay available in every session`)
-    assert.ok(!SESSION_BOUND_TOOLS.includes(n))
+test('a session bound to a remote mirror keeps every rw_* tool', async () => {
+  const { home, mirrorCwd } = makeHome()
+  try {
+    const { apply } = await loadPlugin(home)
+    const ctx = makePluginCtx()
+    await apply(ctx, { ...CONFIG })
+
+    const remote = scopedAgent(mirrorCwd)
+    ctx.emitAgentCreated(remote)
+    assert.deepEqual(remote.calls, [], 'a mirror session must not be fenced at all')
+  } finally {
+    delete process.env.DSH_HOME
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('the fence never runs on the plugin context itself', async () => {
+  // tools.restrict() throws from a context-global caller by design; wired to
+  // the wrong ctx the plugin would break on every load.
+  const { home } = makeHome()
+  try {
+    const { apply } = await loadPlugin(home)
+    const ctx = makePluginCtx()
+    await assert.doesNotReject(() => apply(ctx, { ...CONFIG }))
+  } finally {
+    delete process.env.DSH_HOME
+    rmSync(home, { recursive: true, force: true })
   }
 })
 
 // ── the fence itself ───────────────────────────────────────────────────────
 
-test('fenceAgent hides the session-bound tools from a LOCAL session', () => {
+test('fenceAgent hides the tools from a LOCAL session', () => {
   const { agent, calls } = makeAgent('C:\\Users\\me\\project')
-  const fenced = fenceAgent(agent, () => false)
-  assert.equal(fenced, true)
+  assert.equal(fenceAgent(agent, DENY, () => false), true)
   assert.equal(calls.length, 1)
-  assert.deepEqual([...calls[0].deny].sort(), [...SESSION_BOUND_TOOLS].sort())
+  assert.deepEqual([...calls[0].deny].sort(), [...DENY].sort())
 })
 
 test('fenceAgent leaves a session bound to a remote mirror completely alone', () => {
   const { agent, calls } = makeAgent('/home/dev/.dsh-remote/box-1/proj')
-  assert.equal(fenceAgent(agent, (cwd) => cwd.includes('dsh-remote')), false)
+  assert.equal(fenceAgent(agent, DENY, (cwd) => cwd.includes('dsh-remote')), false)
   assert.deepEqual(calls, [], 'a remote session must keep every rw_* tool')
 })
 
 test('fenceAgent fences a session that has no cwd at all', () => {
   // A tool list we cannot justify is exactly the failure this fence prevents.
   const { agent, calls } = makeAgent(undefined)
-  assert.equal(fenceAgent(agent, () => false), true)
+  assert.equal(fenceAgent(agent, DENY, () => false), true)
   assert.equal(calls.length, 1)
 })
 
 test('fenceAgent survives a missing tools service and a throwing restrict()', () => {
-  assert.equal(fenceAgent({ session: { header: { cwd: '/local' } }, ctx: { get: () => undefined } }, () => false), false)
-  assert.equal(fenceAgent(undefined, () => false), false)
+  assert.equal(fenceAgent({ session: { header: { cwd: '/local' } }, ctx: { get: () => undefined } }, DENY, () => false), false)
+  assert.equal(fenceAgent(undefined, DENY, () => false), false)
   const boom = {
     session: { header: { cwd: '/local' } },
     ctx: { get: () => ({ restrict() { throw new Error('nope') } }) },
   }
   const warned = []
-  assert.equal(fenceAgent(boom, () => false, (m) => warned.push(m)), false)
+  assert.equal(fenceAgent(boom, DENY, () => false, (m) => warned.push(m)), false)
   assert.equal(warned.length, 1, 'a failed fence is reported, not swallowed silently')
 })
 
@@ -231,7 +263,7 @@ test('fenceLocalSessions listens for agent/created and sweeps already-live agent
   const localLive = makeAgent('/home/dev/plain')
   const remoteLive = makeAgent('/home/dev/.dsh-remote/box-1/proj')
   const ctx = makeCtx({ liveAgents: [localLive.agent, remoteLive.agent] })
-  const result = fenceLocalSessions(ctx, (cwd) => cwd.includes('dsh-remote'))
+  const result = fenceLocalSessions(ctx, DENY, (cwd) => cwd.includes('dsh-remote'))
 
   assert.equal(result.fenced, 1, 'a live local session is fenced at load; a live remote one is not')
   assert.equal(localLive.calls.length, 1, 'a plugin loaded into a running host must not wait for the next session')
@@ -249,47 +281,39 @@ test('fenceLocalSessions listens for agent/created and sweeps already-live agent
 test('fenceLocalSessions is a no-op on a ctx with no event surface', () => {
   // Older/headless hosts may not give the plugin `ctx.on`; failing here would
   // take the whole plugin down, so it must degrade to the old behaviour.
-  assert.doesNotThrow(() => fenceLocalSessions({}, () => false))
-  assert.doesNotThrow(() => fenceLocalSessions({ get: () => { throw new Error('no agents service') } }, () => false))
+  assert.doesNotThrow(() => fenceLocalSessions({}, DENY, () => false))
+  assert.doesNotThrow(() => fenceLocalSessions({ get: () => { throw new Error('no agents service') } }, DENY, () => false))
 })
 
-// ── end-to-end through the real apply() ────────────────────────────────────
+// ── no remaining text promises a hidden tool ───────────────────────────────
 
-test('a local session gets no rw_* workspace tools; a mirror session gets all of them', async () => {
-  const { home, mirrorCwd, localCwd } = makeHome()
+test('the /remote command tells a local session it has no rw_* tools', async () => {
+  const { home, localCwd } = makeHome()
   mkdirSync(localCwd, { recursive: true })
   try {
     const { apply } = await loadPlugin(home)
-    const ctx = makePluginCtx()
+    const registered = []
+    const ctx = {
+      effect: () => {},
+      inject: () => {},
+      get: (k) => {
+        if (k === 'sessions') return { get: () => null, list: () => [] }
+        if (k === 'commands') {
+          return { register: (c) => { if (c.name === 'remote') ctx.remoteCommand = c } }
+        }
+        return undefined
+      },
+      logger: { info: () => {}, warn: () => {} },
+      systemPrompt: { section: () => {}, context: () => {} },
+      tools: { register: (t) => { registered.push(t.name); return () => {} }, restrict: () => { throw new Error('scoped only') } },
+    }
     await apply(ctx, { ...CONFIG })
 
-    // Tools are still registered GLOBALLY — a tool registered into an agent's
-    // own layer cannot be named by a restriction, so this must not change.
-    assert.ok(ctx.registered.get('rw_exec'), 'rw_exec must stay registered globally')
-    assert.ok(ctx.registered.get('rw_read_file'))
-
-    const local = scopedAgent(localCwd)
-    const remote = scopedAgent(mirrorCwd)
-    ctx.emitAgentCreated(local)
-    ctx.emitAgentCreated(remote)
-
-    assert.equal(local.calls.length, 1, 'a local session must be fenced')
-    assert.deepEqual([...local.calls[0].deny].sort(), [...SESSION_BOUND_TOOLS].sort())
-    assert.equal(remote.calls.length, 0, 'a mirror session must not be fenced at all')
-  } finally {
-    delete process.env.DSH_HOME
-    rmSync(home, { recursive: true, force: true })
-  }
-})
-
-test('the fence never runs on the plugin context itself', async () => {
-  // tools.restrict() throws from a context-global caller by design; if the fence
-  // were wired to the wrong ctx the plugin would break on every load.
-  const { home } = makeHome()
-  try {
-    const { apply } = await loadPlugin(home)
-    const ctx = makePluginCtx()
-    await assert.doesNotReject(() => apply(ctx, { ...CONFIG }))
+    assert.ok(ctx.remoteCommand, 'the /remote command must be registered')
+    const out = ctx.remoteCommand.handler({ agent: { session: { header: { cwd: localCwd } } } })
+    assert.match(out.text, /not offered the rw_\* tools at all/,
+      'a local session must not be pointed at tools it cannot call')
+    assert.doesNotMatch(out.text, /Use tools: rw_list_dir/)
   } finally {
     delete process.env.DSH_HOME
     rmSync(home, { recursive: true, force: true })
