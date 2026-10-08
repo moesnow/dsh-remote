@@ -28,31 +28,32 @@ import { fenceAgent, fenceLocalSessions } from '../lib/tool-visibility.js'
 
 const DENY = ['rw_info', 'rw_connect', 'rw_machines', 'rw_pick_workspace', 'rw_list_dir', 'rw_exec']
 
-/** An agent whose session workspace is `cwd`, recording every restrict() call. */
+/** An agent whose session workspace is `cwd`, recording restrict()/dispose(). */
 const makeAgent = (cwd) => {
   const calls = []
+  const lifted = []
   const toolsService = {
     restrict(filter) {
       calls.push(filter)
-      return () => {}
+      // dsh-tools returns the exact disposer that lifts the restriction.
+      return () => lifted.push(filter)
     },
   }
-  return {
-    calls,
-    agent: {
-      session: { header: { cwd } },
-      ctx: { get: (name) => (name === 'tools' ? toolsService : undefined) },
-    },
+  const agent = {
+    session: { header: { cwd } },
+    ctx: { get: (name) => (name === 'tools' ? toolsService : undefined) },
   }
+  return { calls, lifted, agent, get liftCount() { return lifted.length } }
 }
 
-/** A plugin-ish ctx: captures `agent/created` listeners and live agents. */
-const makeCtx = ({ liveAgents = [] } = {}) => {
+/** A plugin-ish ctx: captures listeners, live agents, and effect cleanups. */
+const makeCtx = ({ liveAgents = [], withEffect = false } = {}) => {
   const listeners = new Map()
-  const warnings = []
-  return {
+  const cleanups = []
+  const ctx = {
     listeners,
-    warnings,
+    warnings: [],
+    cleanups,
     on(evt, fn) {
       if (!listeners.has(evt)) listeners.set(evt, [])
       listeners.get(evt).push(fn)
@@ -62,11 +63,21 @@ const makeCtx = ({ liveAgents = [] } = {}) => {
       if (name === 'agents') return { list: () => liveAgents }
       return undefined
     },
-    logger: { info: () => {}, warn: (m) => warnings.push(m) },
+    logger: { info: () => {}, warn: (m) => ctx.warnings.push(m) },
     emitAgentCreated(agent) {
       for (const fn of listeners.get('agent/created') || []) fn({ agent })
     },
+    emitAgentDisposed(agent) {
+      for (const fn of listeners.get('agent/disposed') || []) fn({ agent })
+    },
+    /** Run every cleanup the plugin registered, as its unload would. */
+    unload() {
+      for (const cleanup of cleanups) cleanup()
+      cleanups.length = 0
+    },
   }
+  if (withEffect) ctx.effect = (fn) => { cleanups.push(fn()); return () => {} }
+  return ctx
 }
 
 const CONFIG = {
@@ -229,7 +240,8 @@ test('the fence never runs on the plugin context itself', async () => {
 
 test('fenceAgent hides the tools from a LOCAL session', () => {
   const { agent, calls } = makeAgent('C:\\Users\\me\\project')
-  assert.equal(fenceAgent(agent, DENY, () => false), true)
+  const dispose = fenceAgent(agent, DENY, () => false)
+  assert.equal(typeof dispose, 'function', 'a restriction must hand back its disposer')
   assert.equal(calls.length, 1)
   assert.deepEqual([...calls[0].deny].sort(), [...DENY].sort())
 })
@@ -243,7 +255,7 @@ test('fenceAgent leaves a session bound to a remote mirror completely alone', ()
 test('fenceAgent fences a session that has no cwd at all', () => {
   // A tool list we cannot justify is exactly the failure this fence prevents.
   const { agent, calls } = makeAgent(undefined)
-  assert.equal(fenceAgent(agent, DENY, () => false), true)
+  assert.ok(fenceAgent(agent, DENY, () => false))
   assert.equal(calls.length, 1)
 })
 
@@ -272,10 +284,54 @@ test('fenceLocalSessions listens for agent/created and sweeps already-live agent
   const fresh = makeAgent('/home/dev/plain')
   ctx.emitAgentCreated(fresh.agent)
   assert.equal(fresh.calls.length, 1)
+})
 
-  // Fencing is idempotent per agent: a second edge must not stack restrictions.
-  ctx.emitAgentCreated(fresh.agent)
-  assert.equal(fresh.calls.length, 1)
+// ── ownership: dsh-tools registers the restriction on the AGENT's fiber ────
+//
+// `tools.restrict()` is called through the agent's traced context, so its effect
+// belongs to the agent's scope fiber — unloading the plugin does NOT lift it. A
+// deny set from an older version would therefore survive every reload and keep
+// masking tools the current version considers visible.
+
+test('the fence is lifted when the plugin unloads', () => {
+  const agent = makeAgent('/home/dev/plain')
+  const ctx = makeCtx({ liveAgents: [agent.agent], withEffect: true })
+  fenceLocalSessions(ctx, DENY, () => false)
+
+  assert.equal(agent.calls.length, 1, 'the live session is fenced at load')
+  assert.equal(ctx.cleanups.length, 1, 'the plugin must register exactly one cleanup effect')
+  assert.equal(agent.liftCount, 0, 'the restriction is live before unload')
+
+  ctx.unload()
+  assert.equal(agent.liftCount, 1, 'unloading the plugin must lift every restriction it added')
+})
+
+test('re-fencing an agent within one load releases the superseded restriction', () => {
+  const agent = makeAgent('/home/dev/plain')
+  const ctx = makeCtx({ liveAgents: [agent.agent] })
+  fenceLocalSessions(ctx, DENY, () => false)
+  assert.equal(agent.calls.length, 1, 'the load-time sweep fences it')
+
+  // Same agent, same load: the mask must be replaced, not stacked, so the agent
+  // is never left carrying two registrations where one suffices.
+  ctx.emitAgentCreated(agent.agent)
+  assert.equal(agent.calls.length, 2, 'the fence is re-applied')
+  assert.equal(agent.liftCount, 1, 'and the superseded restriction was lifted')
+})
+
+test('a disposed agent does not keep a registration', () => {
+  const agent = makeAgent('/home/dev/plain')
+  const ctx = makeCtx({ withEffect: true })
+  fenceLocalSessions(ctx, DENY, () => false)
+  ctx.emitAgentCreated(agent.agent)
+  assert.equal(agent.calls.length, 1)
+
+  ctx.emitAgentDisposed(agent.agent)
+  assert.equal(agent.liftCount, 1, 'a disposed agent must not keep a registration')
+
+  // …and unloading afterwards must not try to lift it a second time.
+  ctx.unload()
+  assert.equal(agent.liftCount, 1)
 })
 
 test('fenceLocalSessions is a no-op on a ctx with no event surface', () => {
