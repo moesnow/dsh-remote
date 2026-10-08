@@ -26,6 +26,7 @@ import { fenceAgent, fenceLocalSessions } from '../lib/tool-visibility.js'
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
+const isMirror = (agent) => !!(agent && agent.session && agent.session.header.cwd || '').includes('dsh-remote')
 const DENY = ['rw_info', 'rw_connect', 'rw_machines', 'rw_pick_workspace', 'rw_list_dir', 'rw_exec']
 
 /** An agent whose session workspace is `cwd`, recording restrict()/dispose(). */
@@ -248,7 +249,7 @@ test('fenceAgent hides the tools from a LOCAL session', () => {
 
 test('fenceAgent leaves a session bound to a remote mirror completely alone', () => {
   const { agent, calls } = makeAgent('/home/dev/.dsh-remote/box-1/proj')
-  assert.equal(fenceAgent(agent, DENY, (cwd) => cwd.includes('dsh-remote')), false)
+  assert.equal(fenceAgent(agent, DENY, isMirror), false)
   assert.deepEqual(calls, [], 'a remote session must keep every rw_* tool')
 })
 
@@ -275,7 +276,7 @@ test('fenceLocalSessions listens for agent/created and sweeps already-live agent
   const localLive = makeAgent('/home/dev/plain')
   const remoteLive = makeAgent('/home/dev/.dsh-remote/box-1/proj')
   const ctx = makeCtx({ liveAgents: [localLive.agent, remoteLive.agent] })
-  const result = fenceLocalSessions(ctx, DENY, (cwd) => cwd.includes('dsh-remote'))
+  const result = fenceLocalSessions(ctx, DENY, isMirror)
 
   assert.equal(result.fenced, 1, 'a live local session is fenced at load; a live remote one is not')
   assert.equal(localLive.calls.length, 1, 'a plugin loaded into a running host must not wait for the next session')
