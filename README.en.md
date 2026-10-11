@@ -237,7 +237,9 @@ Deploying to a product profile is a separate, explicit action (`./sync.sh`) for 
 | `passphrase` | string | `''` | passphrase for an encrypted private key |
 | `workspace` | string | `''` | default remote workspace path |
 | `shell` | string | `''` | remote command terminal strategy: `''`=auto-detect (Git Bash on Windows remotes), `'git-bash'`=prefer Git Bash, `'native'`=never wrap, anything else=explicit bash.exe path (e.g. `C:\Program Files\Git\bin\bash.exe`) |
-| `commandTimeoutMs` | int | 20000 | per remote command timeout |
+| `commandTimeoutMs` | int | 20000 | Timeout for **internal** remote commands (platform probes, quick checks) and each SFTP operation — it bounds failure detection, not real work |
+| `execTimeoutMs` | int | 120000 | **Default wall-clock budget** (ms) for one `rw_exec` call: pass `timeoutMs` in the tool call for long builds/test suites |
+| `execMaxTimeoutMs` | int | 1800000 | Ceiling (ms) for one `rw_exec` run: the clamp on the tool's `timeoutMs` argument, and the budget the tool declares to DSH's timeout policy |
 | `connectTimeoutMs` | int | 15000 | SSH connect timeout |
 | `maxOutputChars` | int | 200000 | cap on captured stdout/stderr per remote command |
 | `maxFileBytes` | int | 52428800 | skip mirroring/reading files larger than this (0 = no cap) |

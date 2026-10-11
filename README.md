@@ -219,7 +219,9 @@ scripts/dev-run.sh --status    # 是否在运行
 | `passphrase` | string | `''` | 加密私钥的 passphrase |
 | `workspace` | string | `''` | 默认远程工作区路径 |
 | `shell` | string | `''` | 远程命令终端策略：`''`=自动检测（Windows 找 Git Bash）、`'git-bash'`=优先 Git Bash、`'native'`=不包装、其他=显式 bash.exe 路径（如 `C:\Program Files\Git\bin\bash.exe`） |
-| `commandTimeoutMs` | int | 20000 | 单条远程命令超时 |
+| `commandTimeoutMs` | int | 20000 | **内部**远程命令（平台探测、快速检查）与每个 SFTP 操作的超时——它管的是"多久判失败"，不是干活的预算 |
+| `execTimeoutMs` | int | 120000 | `rw_exec` 单次调用的**默认墙钟预算**（ms）：构建/测试等长命令请在工具调用里传 `timeoutMs` 覆盖 |
+| `execMaxTimeoutMs` | int | 1800000 | `rw_exec` 单次运行的上限（ms）：既是工具 `timeoutMs` 参数的钳制值，也是该工具申报给 DSH timeout-policy 的预算 |
 | `connectTimeoutMs` | int | 15000 | SSH 连接超时 |
 | `maxOutputChars` | int | 200000 | 单条远程命令捕获的 stdout/stderr 上限 |
 | `maxFileBytes` | int | 52428800 | 镜像同步时跳过超过该大小的文件（0=不设上限） |
