@@ -189,7 +189,11 @@ test('the fence denies EVERY declared rw_* tool, not a hand-picked subset', asyn
     // Tools stay registered globally: a tool in an agent's own layer cannot be
     // named by a restriction at all, so this must not change.
     const registered = [...ctx.registered.keys()].sort()
-    assert.ok(registered.length >= 25, `expected the full rw_* tool set, got ${registered.length}`)
+    // The floor comes from the source, not a literal: upstream legitimately adds
+    // and removes tools (0.8.41 dropped the three backup tools, 25 → 22), and a
+    // hard-coded count would flag that as a coverage failure.
+    assert.equal(registered.length, declaredToolNames().size,
+      'every declared rw_* tool must be registered')
 
     // …and the deny list is exactly that set, so a new tool cannot slip past.
     const local = scopedAgent(localCwd)

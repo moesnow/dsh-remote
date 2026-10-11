@@ -133,7 +133,9 @@ test('the settings page renders, and it contains the cards the user expects', ()
 
   assert.ok(text.length > 100, 'the panel must render real content')
   assert.match(text, /远程工作区/, 'the plugin title renders')
-  assert.match(text, /工作区备份/, 'the simplified backup card is present')
+  // The workspace-backup capability was REMOVED in 0.8.41 (the user asked for it
+  // to go): its card must not render, and its i18n keys must be gone entirely.
+  assert.doesNotMatch(text, /工作区备份/, 'the backup card is gone')
   // The deploy entry must be present on a FRESH page (it used to require a prior
   // probe plus a failing verdict, so users only ever saw 体检).
   assert.match(text, /体检|部署/, 'the deploy entry is present without running a probe first')
@@ -145,21 +147,16 @@ test('the settings page renders, and it contains the cards the user expects', ()
   assert.ok(slotsSeen.includes('settings.section'), 'the settings slot was used')
 })
 
-test('the backup card offers exactly a Back-up and a Restore control', () => {
-  // The card is collapsed by default (`backupOpen` starts false), so the controls
-  // only exist once it is expanded — which is exactly how a USER reaches them.
-  // Drive the section toggle the way a click does, then assert on what appears.
+test('no backup i18n key survives the capability removal', () => {
+  // The card is gone; nothing backup-shaped may render in ANY section state.
+  // This test owns its hook state: the first test's arrays belong to ITS render
+  // (their cursor positions would corrupt a fresh mount's slots).
   const { Page } = mountClient()
   const hookState = []
   const setters = []
   let hookIndex = 0
   React.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED.ReactCurrentDispatcher.current = {
-    useState(init) {
-      const i = hookIndex++
-      if (hookState[i] === undefined) hookState[i] = typeof init === 'function' ? init() : init
-      if (!setters[i]) setters[i] = (v) => { hookState[i] = typeof v === 'function' ? v(hookState[i]) : v }
-      return [hookState[i], setters[i]]
-    },
+    useState(init) { const i = hookIndex++; if (hookState[i] === undefined) hookState[i] = typeof init === 'function' ? init() : init; if (!setters[i]) setters[i] = (v) => { hookState[i] = typeof v === 'function' ? v(hookState[i]) : v }; return [hookState[i], setters[i]] },
     useEffect() {}, useLayoutEffect() {}, useInsertionEffect() {},
     useMemo(fn) { return fn() }, useCallback(fn) { return fn },
     useRef(v) { return { current: v } }, useContext() { return {} },
@@ -168,31 +165,15 @@ test('the backup card offers exactly a Back-up and a Restore control', () => {
     useTransition() { return [false, (f) => f && f()] }, useDeferredValue(v) { return v },
     useImperativeHandle() {},
   }
-
-  // Render once to fill the state slots, then expand, then render AGAIN.
-  //
-  // `hookIndex` must be reset before every render: it is a cursor into the hook
-  // state array, and leaving it advanced makes the second render read the wrong
-  // slots entirely (which looks like "the toggle did nothing").
   const render = () => { hookIndex = 0; return collectText(Page({})) }
   const collapsed = render()
-  assert.match(collapsed, /工作区备份/, 'the card title is visible while collapsed')
-
-  // Find the state slots that control collapsed sections and flip them.
-  //
-  // The panel has several independent collapsed sections and their useState order
-  // is not part of any contract, so rather than guess WHICH index is the backup
-  // one, expand every section that starts collapsed. The old option fields only
-  // ever existed inside the backup card, so expanding everything cannot make the
-  // "old fields are gone" assertion pass by accident.
+  // Expand every collapsed section: the removal must hold everywhere, not only
+  // in the default view.
   const collapsedIdx = hookState.map((v, i) => (v === false ? i : -1)).filter((i) => i >= 0)
-  assert.ok(collapsedIdx.length > 0, 'the panel starts with collapsed sections')
   for (const i of collapsedIdx) setters[i](true)
   const expanded = render()
-
-  assert.match(expanded, /备份/, 'a Back-up control exists once expanded')
-  assert.match(expanded, /恢复/, 'a Restore control exists once expanded')
-  assert.match(expanded, /选择要恢复的备份时间点/, 'a point-in-time picker exists')
-  // The removed configuration surface must NOT be back.
-  assert.doesNotMatch(expanded, /排除项|存放位置|合并（不删除）/, 'the old option fields are gone')
+  for (const text of [collapsed, expanded]) {
+    assert.doesNotMatch(text, /工作区备份|备份时间点|选择要恢复/, 'no backup UI survives anywhere')
+  }
 })
+
