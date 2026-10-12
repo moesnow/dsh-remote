@@ -72,7 +72,7 @@ caret 在 `0.x` 上会锁死小版本线（`^0.1.x` 容不下 `0.2.x`，反之�
 对 [DeepSeek 官方 Desktop](https://github.com/deepseek-ai/deepseek-harness) 的适配（以 `0.1.5-rc.2` Host 协议验证，不修改 Harness 核心）：
 
 - 经 `ctx.connection.fetch` 注册 `/api/dsh-remote/*`，由 Desktop 的 `dsh-app:` 通道承载，不启动 Web Server。
-- 经 `sidebarRightTabs` 提供原生「远程文件」入口，不把远端路径传给本地预览器。
+- 经 `sidebarRightTabs` 提供原生「远程文件」入口，不把远端路径传给本地预览器；入口只在会话确为远程工作区时出现，本地会话不显示。
 - `dsh-better-sidebar` 不再内置；官方 Desktop 用原生右侧栏，不需要它。
 
 已验证 Host 启动、IPC 请求、真实 SSH 的只读连接/列目录/读文件，以及双机会话路由（侧栏 `/ls` `/read` `/write` `/fs` 带 `sessionId` 时按会话选机）。原生文件 tab 的完整 GUI、失败/取消交互、非 macOS 宿主仍属实验性。Desktop 安装器可能需为 `ssh2` / `cpu-features` 可选构建脚本配置策略。

@@ -184,7 +184,7 @@ test('client hard dependencies are slots and locale only', () => {
 
 test('native right-sidebar attaches late, opens a session-scoped remote file, and disposes', (t) => {
   const { plugin } = loadClient('dsh-app:')
-  const host = createHost([SETTINGS, 'sidebar.right.pane.tab'])
+  const host = createHost([SETTINGS, 'sidebar.right.pane.tab', 'sidebar.right.tab.guide.entry'])
   t.after(() => host.ctx.dispose())
   plugin.apply(host.ctx)
   const types = new Map()
@@ -196,6 +196,12 @@ test('native right-sidebar attaches late, opens a session-scoped remote file, an
   assert.deepEqual([...types.keys()], ['dsh-remote/explorer', 'dsh-remote/file'])
   assert.equal(types.get('dsh-remote/explorer').guide.length, 1)
   assert.deepEqual([...types.get('dsh-remote/file').patterns], ['dsh-resource://dsh-remote/**'])
+  // The guide capsule is ours, not the platform's default entry box: visibility
+  // is the CARD's per-session decision (see guide-entry.test.js).
+  const capsule = host.registrations.get('sidebar.right.tab.guide.entry:dsh-remote/explorer')
+  assert.ok(capsule, 'the guide capsule registers under the explorer type id')
+  assert.equal(typeof capsule.render, 'function')
+  assert.equal(capsule.meta.inject('session-one').sessionId, 'session-one')
   const explorer = host.registrations.get('sidebar.right.pane.tab:dsh-remote/explorer')
   const file = host.registrations.get('sidebar.right.pane.tab:dsh-remote/file')
   let address
